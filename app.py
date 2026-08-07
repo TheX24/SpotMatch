@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from spotify_scraper import SpotifyClient
 from spotify_scraper.api import parse_entities
@@ -298,6 +298,8 @@ class SpotMatchApp(tk.Tk):
         self.geometry("1120x680")
         self.minsize(860, 520)
         self.matches: list[Match] = []
+        self.source_track_id: str | None = None
+        self.custom_presets: dict[str, dict[str, object]] = {}
         self._build_ui()
         self._load_settings()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -328,8 +330,10 @@ class SpotMatchApp(tk.Tk):
         options_row.pack(fill="x")
         ttk.Label(options_row, text="Preset").pack(side="left")
         self.depth_var = tk.StringVar(value="Balanced")
-        preset_box = ttk.Combobox(options_row, textvariable=self.depth_var, values=tuple(PRESETS), state="readonly", width=11)
-        preset_box.pack(side="left", padx=(6, 18))
+        self.preset_box = ttk.Combobox(options_row, textvariable=self.depth_var, values=tuple(PRESETS), state="readonly", width=14)
+        self.preset_box.pack(side="left", padx=(6, 4))
+        ttk.Button(options_row, text="Save", command=self.save_custom_preset, width=5).pack(side="left", padx=(0, 4))
+        ttk.Button(options_row, text="Delete", command=self.delete_custom_preset, width=6).pack(side="left", padx=(0, 18))
         ttk.Label(options_row, text="Minimum match").pack(side="left")
         self.score_var = tk.StringVar(value="60%")
         ttk.Combobox(options_row, textvariable=self.score_var, values=("50%", "60%", "70%", "75%", "80%", "90%", "95%"), state="readonly", width=6).pack(side="left", padx=(6, 18))
@@ -368,7 +372,7 @@ class SpotMatchApp(tk.Tk):
             text="Include variant queries (cover, remix, live, instrumental, karaoke, sped up, slowed)",
             variable=self.variants_var,
         ).grid(row=2, column=0, columnspan=len(limit_fields), pady=(10, 0), sticky="w")
-        preset_box.bind("<<ComboboxSelected>>", self.apply_preset)
+        self.preset_box.bind("<<ComboboxSelected>>", self.apply_preset)
 
         self.status_var = tk.StringVar(value="Paste a Spotify track ID or URL, then press Enter.")
         ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(24, 4, 24, 12)).pack(fill="x")
@@ -392,6 +396,7 @@ class SpotMatchApp(tk.Tk):
         actions = ttk.Frame(self, padding=(24, 16))
         actions.pack(fill="x")
         ttk.Button(actions, text="Copy selected IDs", command=self.copy_selected).pack(side="left")
+        ttk.Button(actions, text="Copy selected + source", command=self.copy_selected_with_source).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Open in Spotify", command=self.open_selected).pack(side="left", padx=8)
         ttk.Button(actions, text="Select all", command=self.select_all).pack(side="left")
         ttk.Button(actions, text="Export selected to TXT", command=self.export_selected, style="Accent.TButton").pack(side="left", padx=8)
@@ -414,6 +419,7 @@ class SpotMatchApp(tk.Tk):
             "tracks_per_playlist": self.playlist_tracks_var.get(),
             "title_floor": self.title_floor_var.get(),
             "variant_queries": self.variants_var.get(),
+            "custom_presets": self.custom_presets,
         }
 
     def _save_settings(self) -> None:
@@ -431,9 +437,16 @@ class SpotMatchApp(tk.Tk):
         if not isinstance(settings, dict):
             return
 
+        custom_presets = settings.get("custom_presets")
+        if isinstance(custom_presets, dict):
+            for name, preset in custom_presets.items():
+                if self._valid_custom_preset(name, preset):
+                    self.custom_presets[name] = preset
+        self._refresh_preset_box()
+
         string_values = (
             ("input", self.input_var, None),
-            ("preset", self.depth_var, tuple(PRESETS)),
+            ("preset", self.depth_var, tuple(PRESETS) + tuple(self.custom_presets)),
             ("minimum_score", self.score_var, ("50%", "60%", "70%", "75%", "80%", "90%", "95%")),
             ("maximum_duration", self.duration_var, ("1 sec", "2 sec", "5 sec", "10 sec", "30 sec", "120 sec")),
         )
@@ -477,8 +490,99 @@ class SpotMatchApp(tk.Tk):
         else:
             self.limits_frame.pack_forget()
 
+    def _refresh_preset_box(self) -> None:
+        self.preset_box.configure(values=tuple(PRESETS) + tuple(self.custom_presets))
+
+    def _preset_values(self) -> dict[str, object]:
+        return {
+            "minimum_score": self.score_var.get(),
+            "maximum_duration": self.duration_var.get(),
+            "exact_title": self.exact_title_var.get(),
+            "search_pages": self.pages_var.get(),
+            "search_repeats": self.repeats_var.get(),
+            "releases": self.releases_var.get(),
+            "albums": self.albums_var.get(),
+            "playlists": self.playlists_var.get(),
+            "playlist_tracks": self.playlist_tracks_var.get(),
+            "title_floor": self.title_floor_var.get(),
+            "variants": self.variants_var.get(),
+        }
+
+    @staticmethod
+    def _valid_custom_preset(name: object, preset: object) -> bool:
+        if not isinstance(name, str) or not name.strip() or name.casefold() in {item.casefold() for item in PRESETS}:
+            return False
+        if not isinstance(preset, dict):
+            return False
+        if preset.get("minimum_score") not in ("50%", "60%", "70%", "75%", "80%", "90%", "95%"):
+            return False
+        if preset.get("maximum_duration") not in ("1 sec", "2 sec", "5 sec", "10 sec", "30 sec", "120 sec"):
+            return False
+        if not isinstance(preset.get("exact_title"), bool) or not isinstance(preset.get("variants"), bool):
+            return False
+        integer_values = (
+            ("search_pages", 1, 20),
+            ("search_repeats", 1, 20),
+            ("releases", 0, 1000),
+            ("albums", 0, 1000),
+            ("playlists", 0, 500),
+            ("playlist_tracks", 0, 5000),
+            ("title_floor", 0, 100),
+        )
+        return all(
+            isinstance(preset.get(key), int)
+            and not isinstance(preset[key], bool)
+            and minimum <= preset[key] <= maximum
+            for key, minimum, maximum in integer_values
+        )
+
+    def save_custom_preset(self) -> None:
+        name = simpledialog.askstring("Save custom preset", "Preset name:", parent=self)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showerror("Invalid preset name", "Enter a preset name.", parent=self)
+            return
+        if name.casefold() in {item.casefold() for item in PRESETS}:
+            messagebox.showerror("Built-in preset", "Choose a different name; built-in presets cannot be replaced.", parent=self)
+            return
+        existing = next((item for item in self.custom_presets if item.casefold() == name.casefold()), None)
+        if existing and not messagebox.askyesno("Replace preset?", f'Replace the custom preset "{existing}"?', parent=self):
+            return
+        try:
+            preset = self._preset_values()
+        except tk.TclError:
+            messagebox.showerror("Invalid search limit", "Enter valid numbers for every search limit.", parent=self)
+            return
+        if existing and existing != name:
+            del self.custom_presets[existing]
+        self.custom_presets[name] = preset
+        self.depth_var.set(name)
+        self._refresh_preset_box()
+        self._save_settings()
+        self.status_var.set(f'Saved custom preset "{name}"')
+
+    def delete_custom_preset(self) -> None:
+        name = self.depth_var.get()
+        if name not in self.custom_presets:
+            messagebox.showinfo("Built-in preset", "Built-in presets cannot be deleted.", parent=self)
+            return
+        if not messagebox.askyesno("Delete preset?", f'Delete the custom preset "{name}"?', parent=self):
+            return
+        del self.custom_presets[name]
+        self.depth_var.set("Balanced")
+        self._refresh_preset_box()
+        self.apply_preset()
+        self._save_settings()
+        self.status_var.set(f'Deleted custom preset "{name}"')
+
     def apply_preset(self, _event=None) -> None:
-        preset = PRESETS[self.depth_var.get()]
+        preset = PRESETS.get(self.depth_var.get()) or self.custom_presets[self.depth_var.get()]
+        if "minimum_score" in preset:
+            self.score_var.set(preset["minimum_score"])
+            self.duration_var.set(preset["maximum_duration"])
+            self.exact_title_var.set(preset["exact_title"])
         self.pages_var.set(preset["search_pages"])
         self.repeats_var.set(preset["search_repeats"])
         self.releases_var.set(preset["releases"])
@@ -491,7 +595,7 @@ class SpotMatchApp(tk.Tk):
     def search(self) -> None:
         raw_id = self.input_var.get().strip()
         try:
-            extract_track_id(raw_id)
+            self.source_track_id = extract_track_id(raw_id)
         except ValueError as error:
             messagebox.showerror("Invalid Spotify ID", str(error), parent=self)
             return
@@ -567,6 +671,14 @@ class SpotMatchApp(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(ids)
             self.status_var.set(f"Copied {len(matches)} Spotify ID{'s' if len(matches) != 1 else ''}")
+
+    def copy_selected_with_source(self) -> None:
+        matches = self.selected_matches()
+        if matches and self.source_track_id:
+            ids = [self.source_track_id, *(match.track_id for match in matches if match.track_id != self.source_track_id)]
+            self.clipboard_clear()
+            self.clipboard_append(",".join(ids))
+            self.status_var.set(f"Copied source ID and {len(ids) - 1} selected alternative{'s' if len(ids) != 2 else ''}")
 
     def select_all(self) -> None:
         self.table.selection_set(self.table.get_children())
