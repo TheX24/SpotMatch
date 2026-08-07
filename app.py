@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -7,6 +8,7 @@ import unicodedata
 import webbrowser
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Callable
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -24,6 +26,8 @@ PRESETS = {
     "Deep": dict(search_pages=1, search_repeats=3, releases=200, albums=0, playlists=0, playlist_tracks=0, title_floor=58, variants=False),
     "Exhaustive": dict(search_pages=20, search_repeats=3, releases=200, albums=150, playlists=60, playlist_tracks=500, title_floor=58, variants=True),
 }
+
+SETTINGS_PATH = Path(os.environ.get("APPDATA", Path.home())) / "SpotMatch" / "settings.json"
 
 
 def extract_track_id(value: str) -> str:
@@ -295,6 +299,8 @@ class SpotMatchApp(tk.Tk):
         self.minsize(860, 520)
         self.matches: list[Match] = []
         self._build_ui()
+        self._load_settings()
+        self.protocol("WM_DELETE_WINDOW", self._close)
         sv_ttk.set_theme("dark")
 
     def _build_ui(self) -> None:
@@ -392,6 +398,79 @@ class SpotMatchApp(tk.Tk):
         ttk.Label(actions, text="Ctrl/Shift-click to select multiple · double-click to open").pack(side="right")
         entry.focus_set()
 
+    def _settings(self) -> dict[str, object]:
+        return {
+            "input": self.input_var.get(),
+            "preset": self.depth_var.get(),
+            "minimum_score": self.score_var.get(),
+            "maximum_duration": self.duration_var.get(),
+            "exact_title": self.exact_title_var.get(),
+            "show_advanced": self.advanced_var.get(),
+            "search_pages": self.pages_var.get(),
+            "search_repeats": self.repeats_var.get(),
+            "artist_releases": self.releases_var.get(),
+            "global_albums": self.albums_var.get(),
+            "global_playlists": self.playlists_var.get(),
+            "tracks_per_playlist": self.playlist_tracks_var.get(),
+            "title_floor": self.title_floor_var.get(),
+            "variant_queries": self.variants_var.get(),
+        }
+
+    def _save_settings(self) -> None:
+        try:
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            SETTINGS_PATH.write_text(json.dumps(self._settings(), indent=2), encoding="utf-8")
+        except (OSError, tk.TclError):
+            pass
+
+    def _load_settings(self) -> None:
+        try:
+            settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(settings, dict):
+            return
+
+        string_values = (
+            ("input", self.input_var, None),
+            ("preset", self.depth_var, tuple(PRESETS)),
+            ("minimum_score", self.score_var, ("50%", "60%", "70%", "75%", "80%", "90%", "95%")),
+            ("maximum_duration", self.duration_var, ("1 sec", "2 sec", "5 sec", "10 sec", "30 sec", "120 sec")),
+        )
+        for key, variable, allowed in string_values:
+            value = settings.get(key)
+            if isinstance(value, str) and (allowed is None or value in allowed):
+                variable.set(value)
+
+        integer_values = (
+            ("search_pages", self.pages_var, 1, 20),
+            ("search_repeats", self.repeats_var, 1, 20),
+            ("artist_releases", self.releases_var, 0, 1000),
+            ("global_albums", self.albums_var, 0, 1000),
+            ("global_playlists", self.playlists_var, 0, 500),
+            ("tracks_per_playlist", self.playlist_tracks_var, 0, 5000),
+            ("title_floor", self.title_floor_var, 0, 100),
+        )
+        for key, variable, minimum, maximum in integer_values:
+            value = settings.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and minimum <= value <= maximum:
+                variable.set(value)
+
+        boolean_values = (
+            ("exact_title", self.exact_title_var),
+            ("show_advanced", self.advanced_var),
+            ("variant_queries", self.variants_var),
+        )
+        for key, variable in boolean_values:
+            value = settings.get(key)
+            if isinstance(value, bool):
+                variable.set(value)
+        self.toggle_advanced()
+
+    def _close(self) -> None:
+        self._save_settings()
+        self.destroy()
+
     def toggle_advanced(self) -> None:
         if self.advanced_var.get():
             self.limits_frame.pack(fill="x", padx=24, pady=(0, 10), after=self.options_row)
@@ -416,6 +495,7 @@ class SpotMatchApp(tk.Tk):
         except ValueError as error:
             messagebox.showerror("Invalid Spotify ID", str(error), parent=self)
             return
+        self._save_settings()
         self.search_button.configure(state="disabled", text="Searching…")
         self.status_var.set("Reading the source track and searching Spotify…")
         self.progress_bar.configure(value=0, maximum=1)

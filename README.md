@@ -16,6 +16,7 @@ Search options:
 
 - **Quick, Balanced, Deep, and Exhaustive are presets only.** Choosing one fills the editable limits below it.
 - Open **Show advanced options** to configure search pages (50 results each, up to Spotify's 1,000-result ceiling), repeated search passes, artist releases, global albums, playlists, tracks per playlist, title-similarity floor, and variant queries independently.
+- Your last track input, preset, filters, and advanced search limits are restored the next time you open SpotMatch.
 - Repeated passes rerun Spotify search and merge/deduplicate the changing results, helping catch compilation IDs that Spotify ranks differently each time.
 - The Exhaustive preset uses 20 pages × 3 passes, 200 artist releases, 150 global albums, 60 playlists with up to 500 tracks each, and cover/remix/live/instrumental query expansion. This can take several minutes.
 - Filter by minimum match score, maximum duration difference, and exact normalized title.
