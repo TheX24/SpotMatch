@@ -422,27 +422,62 @@ class SpotMatchApp(tk.Tk):
             "custom_presets": self.custom_presets,
         }
 
-    def _save_settings(self) -> None:
+    def _save_settings(self) -> bool:
+        temporary_path = SETTINGS_PATH.with_suffix(".tmp")
         try:
             SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS_PATH.write_text(json.dumps(self._settings(), indent=2), encoding="utf-8")
-        except (OSError, tk.TclError):
-            pass
+            temporary_path.write_text(json.dumps(self._settings(), indent=2), encoding="utf-8")
+            os.replace(temporary_path, SETTINGS_PATH)
+        except (OSError, tk.TclError) as error:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            messagebox.showerror(
+                "Could not save settings",
+                f"SpotMatch could not save your settings to:\n{SETTINGS_PATH}\n\n{error}",
+                parent=self,
+            )
+            return False
+        return True
 
     def _load_settings(self) -> None:
         try:
             settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as error:
+            messagebox.showwarning(
+                "Could not load settings",
+                f"SpotMatch could not load your settings from:\n{SETTINGS_PATH}\n\n{error}",
+                parent=self,
+            )
             return
         if not isinstance(settings, dict):
+            messagebox.showwarning(
+                "Could not load settings",
+                f"SpotMatch ignored invalid settings in:\n{SETTINGS_PATH}",
+                parent=self,
+            )
             return
 
         custom_presets = settings.get("custom_presets")
+        rejected_presets: list[str] = []
         if isinstance(custom_presets, dict):
             for name, preset in custom_presets.items():
                 if self._valid_custom_preset(name, preset):
                     self.custom_presets[name] = preset
+                else:
+                    rejected_presets.append(str(name))
         self._refresh_preset_box()
+
+        if rejected_presets:
+            names = "\n".join(f"• {name}" for name in rejected_presets)
+            messagebox.showwarning(
+                "Invalid custom presets",
+                f"SpotMatch ignored these invalid custom presets:\n\n{names}",
+                parent=self,
+            )
 
         string_values = (
             ("input", self.input_var, None),
@@ -481,8 +516,12 @@ class SpotMatchApp(tk.Tk):
         self.toggle_advanced()
 
     def _close(self) -> None:
-        self._save_settings()
-        self.destroy()
+        if self._save_settings() or messagebox.askyesno(
+            "Close without saving?",
+            "SpotMatch could not save your settings. Close the app anyway?",
+            parent=self,
+        ):
+            self.destroy()
 
     def toggle_advanced(self) -> None:
         if self.advanced_var.get():
@@ -555,13 +594,29 @@ class SpotMatchApp(tk.Tk):
         except tk.TclError:
             messagebox.showerror("Invalid search limit", "Enter valid numbers for every search limit.", parent=self)
             return
+        if not self._valid_custom_preset(name, preset):
+            messagebox.showerror(
+                "Invalid custom preset",
+                "Enter values within the limits shown for every search option.",
+                parent=self,
+            )
+            return
+        previous_preset = self.custom_presets.get(existing) if existing else None
+        previous_selection = self.depth_var.get()
         if existing and existing != name:
             del self.custom_presets[existing]
         self.custom_presets[name] = preset
         self.depth_var.set(name)
         self._refresh_preset_box()
-        self._save_settings()
-        self.status_var.set(f'Saved custom preset "{name}"')
+        if self._save_settings():
+            self.status_var.set(f'Saved custom preset "{name}"')
+            return
+
+        del self.custom_presets[name]
+        if existing and previous_preset is not None:
+            self.custom_presets[existing] = previous_preset
+        self.depth_var.set(previous_selection)
+        self._refresh_preset_box()
 
     def delete_custom_preset(self) -> None:
         name = self.depth_var.get()
@@ -570,12 +625,18 @@ class SpotMatchApp(tk.Tk):
             return
         if not messagebox.askyesno("Delete preset?", f'Delete the custom preset "{name}"?', parent=self):
             return
-        del self.custom_presets[name]
+        deleted_preset = self.custom_presets.pop(name)
         self.depth_var.set("Balanced")
         self._refresh_preset_box()
         self.apply_preset()
-        self._save_settings()
-        self.status_var.set(f'Deleted custom preset "{name}"')
+        if self._save_settings():
+            self.status_var.set(f'Deleted custom preset "{name}"')
+            return
+
+        self.custom_presets[name] = deleted_preset
+        self.depth_var.set(name)
+        self._refresh_preset_box()
+        self.apply_preset()
 
     def apply_preset(self, _event=None) -> None:
         preset = PRESETS.get(self.depth_var.get()) or self.custom_presets[self.depth_var.get()]
