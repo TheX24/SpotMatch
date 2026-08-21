@@ -1,0 +1,138 @@
+name: Build desktop apps
+
+on:
+  push:
+    branches: [dev]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate tag against VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python scripts/validate_release_version.py --tag "${{ github.ref_name }}"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            kind: windows
+            artifact: SpotMatch-Windows-x64.zip
+          - name: Linux x86_64 AppImage
+            runner: ubuntu-22.04
+            kind: linux
+            artifact: SpotMatch-Linux-x86_64.AppImage
+          - name: macOS Intel
+            runner: macos-15-intel
+            kind: macos
+            artifact: SpotMatch-macOS-x64.zip
+          - name: macOS Apple Silicon
+            runner: macos-15
+            kind: macos
+            artifact: SpotMatch-macOS-arm64.zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Linux build dependencies
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 python3-tk
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt pyinstaller==6.22.2
+      - name: Test
+        run: python -m unittest discover -s tests -v
+      - name: Build with PyInstaller
+        run: python -m PyInstaller --noconfirm --clean SpotMatch.spec
+
+      - name: Package Windows app
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: Compress-Archive -LiteralPath dist/SpotMatch.exe -DestinationPath "${{ matrix.artifact }}"
+
+      - name: Package macOS app
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: ditto -c -k --sequesterRsrc --keepParent dist/SpotMatch.app "${{ matrix.artifact }}"
+
+      - name: Build Linux AppImage
+        if: matrix.kind == 'linux'
+        shell: bash
+        env:
+          APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+        run: |
+          mkdir -p AppDir/usr/bin
+          install -m 755 dist/SpotMatch AppDir/usr/bin/SpotMatch
+          install -m 755 packaging/linux/AppRun AppDir/AppRun
+          install -m 644 packaging/linux/SpotMatch.desktop AppDir/SpotMatch.desktop
+          install -m 644 packaging/linux/spotmatch.svg AppDir/spotmatch.svg
+          curl --fail --location --retry 3 \
+            --output appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "$APPIMAGETOOL_SHA256  appimagetool-x86_64.AppImage" | sha256sum --check
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 VERSION="$(cat VERSION)" \
+            ./appimagetool-x86_64.AppImage --appimage-extract-and-run \
+            AppDir "${{ matrix.artifact }}"
+          test -x "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: Publish tagged release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          pattern: SpotMatch-*
+          merge-multiple: true
+      - name: Verify release assets
+        shell: bash
+        run: |
+          test -f release-assets/SpotMatch-Windows-x64.zip
+          test -f release-assets/SpotMatch-Linux-x86_64.AppImage
+          test -f release-assets/SpotMatch-macOS-x64.zip
+          test -f release-assets/SpotMatch-macOS-arm64.zip
+      - name: Create release or replace its assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" release-assets/* \
+              --verify-tag \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "SpotMatch $tag" \
+              --notes "Cross-platform SpotMatch release. Release notes will be added manually."
+          fi

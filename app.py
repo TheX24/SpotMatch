@@ -5,7 +5,6 @@ import os
 import re
 import threading
 import unicodedata
-import webbrowser
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -16,6 +15,14 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from spotify_scraper import SpotifyClient
 from spotify_scraper.api import parse_entities
 import sv_ttk
+
+from release_support import (
+    APP_VERSION,
+    ReleaseInfo,
+    classify_update,
+    fetch_latest_release,
+    open_uri,
+)
 
 
 TRACK_ID_RE = re.compile(r"(?:spotify:track:|open\.spotify\.com/track/)?([A-Za-z0-9]{22})")
@@ -294,16 +301,18 @@ def find_matches(
 class SpotMatchApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("SpotMatch")
+        self.title(f"SpotMatch {APP_VERSION}")
         self.geometry("1120x680")
         self.minsize(860, 520)
         self.matches: list[Match] = []
         self.source_track_id: str | None = None
         self.custom_presets: dict[str, dict[str, object]] = {}
+        self._update_check_running = False
         self._build_ui()
         self._load_settings()
         self.protocol("WM_DELETE_WINDOW", self._close)
         sv_ttk.set_theme("dark")
+        self.after(1000, lambda: self.check_for_updates(manual=False))
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
@@ -400,8 +409,64 @@ class SpotMatchApp(tk.Tk):
         ttk.Button(actions, text="Open in Spotify", command=self.open_selected).pack(side="left", padx=8)
         ttk.Button(actions, text="Select all", command=self.select_all).pack(side="left")
         ttk.Button(actions, text="Export selected to TXT", command=self.export_selected, style="Accent.TButton").pack(side="left", padx=8)
+        ttk.Button(actions, text="Check for updates", command=self.check_for_updates).pack(side="right")
         ttk.Label(actions, text="Ctrl/Shift-click to select multiple · double-click to open").pack(side="right")
         entry.focus_set()
+
+    def check_for_updates(self, manual: bool = True) -> None:
+        if self._update_check_running:
+            if manual:
+                messagebox.showinfo("Check for updates", "An update check is already running.", parent=self)
+            return
+        self._update_check_running = True
+        threading.Thread(target=self._check_for_updates_worker, args=(manual,), daemon=True).start()
+
+    def _check_for_updates_worker(self, manual: bool) -> None:
+        release: ReleaseInfo | None = None
+        error: Exception | None = None
+        try:
+            release = fetch_latest_release()
+        except Exception as caught_error:
+            error = caught_error
+        self.after(
+            0,
+            lambda: self._show_update_result(
+                manual=manual,
+                release=release,
+                error=error,
+            ),
+        )
+
+    def _show_update_result(
+        self,
+        manual: bool,
+        release: ReleaseInfo | None,
+        error: Exception | None,
+    ) -> None:
+        self._update_check_running = False
+        outcome = classify_update(APP_VERSION, release, error)
+        if outcome == "newer" and release is not None:
+            should_open = messagebox.askyesno(
+                "SpotMatch update available",
+                f"SpotMatch {release.version} is available.\n\n"
+                f"You are using {APP_VERSION}. Open the release page?",
+                parent=self,
+            )
+            if should_open:
+                open_uri(release.html_url, fallback_url=release.html_url)
+        elif manual and outcome == "current":
+            messagebox.showinfo(
+                "Check for updates",
+                f"SpotMatch {APP_VERSION} is up to date.",
+                parent=self,
+            )
+        elif manual:
+            messagebox.showerror(
+                "Could not check for updates",
+                f"{error or 'The latest release information was invalid.'}\n\n"
+                "Check your internet connection and try again.",
+                parent=self,
+            )
 
     def _settings(self) -> dict[str, object]:
         return {
@@ -767,11 +832,13 @@ class SpotMatchApp(tk.Tk):
         if not matches:
             return
         match = matches[0]
-        try:
-            os.startfile(f"spotify:track:{match.track_id}")
+        result = open_uri(
+            f"spotify:track:{match.track_id}",
+            fallback_url=f"https://open.spotify.com/track/{match.track_id}",
+        )
+        if result == "native":
             self.status_var.set(f"Opened {match.track_id} in Spotify")
-        except OSError:
-            webbrowser.open(f"https://open.spotify.com/track/{match.track_id}")
+        else:
             self.status_var.set(f"Opened {match.track_id} in your browser")
 
 

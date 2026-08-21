@@ -2,9 +2,37 @@
 
 Find alternate Spotify IDs for the same recording without a Spotify login or developer API key.
 
-## Use the Windows app
+## Download the desktop app
 
-1. Open `SpotMatch.exe`.
+Stable `vX.Y.Z` tags publish four downloads on the matching GitHub Release:
+
+- **Windows x64:** `SpotMatch-Windows-x64.zip`
+- **Linux x86_64:** `SpotMatch-Linux-x86_64.AppImage`
+- **macOS Intel:** `SpotMatch-macOS-x64.zip`
+- **macOS Apple Silicon:** `SpotMatch-macOS-arm64.zip`
+
+Extract the Windows or macOS ZIP, then open SpotMatch. The macOS builds are unsigned and unnotarized, so Gatekeeper may require you to approve the app explicitly in **System Settings → Privacy & Security**.
+
+On Linux, mark the AppImage executable and run it:
+
+```bash
+chmod +x SpotMatch-Linux-x86_64.AppImage
+./SpotMatch-Linux-x86_64.AppImage
+```
+
+If FUSE is unavailable, use AppImage's extraction fallback:
+
+```bash
+./SpotMatch-Linux-x86_64.AppImage --appimage-extract-and-run
+```
+
+SpotMatch checks for newer stable releases in the background at startup and only interrupts you when an update exists. Use **Check for updates** for a manual check that also reports when you are current or a check fails. Updates open the GitHub Release page; SpotMatch never downloads or installs them automatically.
+
+Pushes to `dev` produce temporary test artifacts in GitHub Actions. Stable tags publish a GitHub Release after every platform build passes. Release notes are edited manually on the release page.
+
+## Use SpotMatch
+
+1. Open SpotMatch.
 2. Paste a Spotify track ID, URI, or URL.
 3. Click **Find matches**.
 4. Ctrl/Shift-click to select results, then copy or export them in the Spicy Lyrics bot format: `id1,id2,id3` with no spaces.

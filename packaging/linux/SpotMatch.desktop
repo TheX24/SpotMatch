@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=SpotMatch
+Comment=Find alternate Spotify IDs for the same recording
+Exec=SpotMatch
+Icon=spotmatch
+Terminal=false
+Categories=AudioVideo;Utility;
