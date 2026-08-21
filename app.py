@@ -12,7 +12,7 @@ from typing import Callable
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from spotify_scraper import SpotifyClient
+from spotify_scraper import SpotifyClient, SpotifyScraperError
 from spotify_scraper.api import parse_entities
 import sv_ttk
 
@@ -184,7 +184,10 @@ def find_matches(
                     progress(f"Search pass {pass_index + 1}/{options.search_repeats} · query {query_index + 1}/{len(queries)}", search_step, search_total)
                 extra_types = (("album",) if options.global_albums else ()) + (("playlist",) if options.global_playlists else ())
                 entity_types = ("track",) + extra_types
-                results = client.search(query, types=entity_types, limit=50)
+                try:
+                    results = client.search(query, types=entity_types, limit=50)
+                except SpotifyScraperError:
+                    continue
                 for candidate in results.tracks:
                     if candidate.id != track_id:
                         match = score_candidate(source, candidate)
@@ -213,19 +216,22 @@ def find_matches(
                             pagination_total,
                         )
 
-                for candidate in paginated_track_search(
-                    client,
-                    paginated_query,
-                    options.search_pages * 50,
-                    page_progress,
-                ):
-                    paginated_hits += 1
-                    if candidate.id == track_id:
-                        continue
-                    match = score_candidate(source, candidate)
-                    previous = candidates.get(candidate.id)
-                    if previous is None or match.score > previous.score:
-                        candidates[candidate.id] = match
+                try:
+                    for candidate in paginated_track_search(
+                        client,
+                        paginated_query,
+                        options.search_pages * 50,
+                        page_progress,
+                    ):
+                        paginated_hits += 1
+                        if candidate.id == track_id:
+                            continue
+                        match = score_candidate(source, candidate)
+                        previous = candidates.get(candidate.id)
+                        if previous is None or match.score > previous.score:
+                            candidates[candidate.id] = match
+                except SpotifyScraperError:
+                    continue
 
         release_limit = options.releases_per_artist
         release_ids: list[str] = []
