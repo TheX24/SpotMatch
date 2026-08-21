@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import threading
 import unicodedata
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from spotify_scraper import SpotifyClient, SpotifyScraperError
+from spotify_scraper import AsyncSpotifyClient, RateLimit, SpotifyScraperError
 from spotify_scraper.api import parse_entities
+from spotify_scraper.http.ratelimit import PARTNER_API_HOST
 import sv_ttk
 
 from release_support import (
@@ -106,23 +109,51 @@ def score_candidate(source, candidate, album_name: str | None = None) -> Match:
 
 
 ProgressCallback = Callable[[str, int, int], None]
+_T = TypeVar("_T")
+MAX_CONCURRENCY = 20
+ENTITY_CONCURRENCY = 5
+PARTNER_API_RATE_LIMIT = RateLimit(per_second=128, burst=20)
+OPEN_SPOTIFY_HOST = "open.spotify.com"
+OPEN_SPOTIFY_RATE_LIMIT = RateLimit(per_second=16, burst=5)
 
 
-def paginated_track_search(
-    client: SpotifyClient,
+async def _bounded_gather(
+    operations: Sequence[Callable[[], Awaitable[_T]]],
+    on_complete: Callable[[int], None] | None = None,
+    *,
+    limit: int = MAX_CONCURRENCY,
+) -> list[_T]:
+    semaphore = asyncio.Semaphore(limit)
+    completed = 0
+
+    async def run(operation: Callable[[], Awaitable[_T]]) -> _T:
+        nonlocal completed
+        async with semaphore:
+            result = await operation()
+        completed += 1
+        if on_complete:
+            on_complete(completed)
+        return result
+
+    return list(await asyncio.gather(*(run(operation) for operation in operations)))
+
+
+async def paginated_track_search_async(
+    client: AsyncSpotifyClient,
     query: str,
     maximum: int = 1000,
     progress: ProgressCallback | None = None,
-):
+) -> list[object]:
     """Page Spotify's private web search beyond SpotifyScraper's first page."""
     offset = 0
     page_size = 50
     seen: set[str] = set()
-    token = client._tokens.token()
+    tracks: list[object] = []
+    token = await client._tokens.token()
     while offset < maximum:
         if progress:
             progress("Paginating Spotify results", offset // page_size + 1, max(1, (maximum + page_size - 1) // page_size))
-        data = client._search_request(
+        data = await client._search_request(
             query,
             token,
             {"limit": page_size, "offset": offset},
@@ -135,23 +166,30 @@ def paginated_track_search(
             break
         for track in new_tracks:
             seen.add(track.id)
-            yield track
+            tracks.append(track)
         offset += page_size
         if offset >= min(results.total, maximum):
             break
+    return tracks
 
 
-def find_matches(
+async def _find_matches_async(
     raw_id: str,
     options: SearchOptions | None = None,
     progress: ProgressCallback | None = None,
 ) -> tuple[object, list[Match], str]:
     options = options or SearchOptions()
     track_id = extract_track_id(raw_id)
-    with SpotifyClient() as client:
+    async with AsyncSpotifyClient(
+        max_concurrency=MAX_CONCURRENCY,
+        host_rate_limits={
+            PARTNER_API_HOST: PARTNER_API_RATE_LIMIT,
+            OPEN_SPOTIFY_HOST: OPEN_SPOTIFY_RATE_LIMIT,
+        },
+    ) as client:
         if progress:
             progress("Reading source track", 0, 1)
-        source = client.get_track(track_id)
+        source = await client.get_track(track_id)
         if progress:
             progress("Reading source track", 1, 1)
         artist_names = " ".join(artist.name for artist in source.artists)
@@ -176,119 +214,185 @@ def find_matches(
         seen_discovered_albums: set[str] = set()
         seen_discovered_playlists: set[str] = set()
         search_total = max(1, options.search_repeats * len(queries))
-        search_step = 0
+        search_specs: list[tuple[int, int, str]] = []
         for pass_index in range(options.search_repeats):
             for query_index, query in enumerate(queries):
-                search_step += 1
-                if progress:
-                    progress(f"Search pass {pass_index + 1}/{options.search_repeats} · query {query_index + 1}/{len(queries)}", search_step, search_total)
-                extra_types = (("album",) if options.global_albums else ()) + (("playlist",) if options.global_playlists else ())
-                entity_types = ("track",) + extra_types
-                try:
-                    results = client.search(query, types=entity_types, limit=50)
-                except SpotifyScraperError:
-                    continue
-                for candidate in results.tracks:
-                    if candidate.id != track_id:
-                        match = score_candidate(source, candidate)
-                        previous = candidates.get(candidate.id)
-                        if previous is None or match.score > previous.score:
-                            candidates[candidate.id] = match
-                for album in results.albums:
-                    if album.id not in seen_discovered_albums:
-                        seen_discovered_albums.add(album.id)
-                        discovered_album_ids.append(album.id)
-                for playlist in results.playlists:
-                    if playlist.id not in seen_discovered_playlists:
-                        seen_discovered_playlists.add(playlist.id)
-                        discovered_playlist_ids.append(playlist.id)
+                search_specs.append((pass_index, query_index, query))
+        extra_types = (("album",) if options.global_albums else ()) + (("playlist",) if options.global_playlists else ())
+        entity_types = ("track",) + extra_types
+
+        async def run_search(query: str):
+            try:
+                return await client.search(query, types=entity_types, limit=50)
+            except SpotifyScraperError:
+                return None
+
+        operations = [lambda query=query: run_search(query) for _pass, _index, query in search_specs]
+
+        def search_complete(current: int) -> None:
+            if progress:
+                pass_index, query_index, _query = search_specs[current - 1]
+                progress(
+                    f"Search pass {pass_index + 1}/{options.search_repeats} · query {query_index + 1}/{len(queries)}",
+                    current,
+                    search_total,
+                )
+
+        search_results = await _bounded_gather(operations, search_complete)
+        for results in search_results:
+            if results is None:
+                continue
+            for candidate in results.tracks:
+                if candidate.id != track_id:
+                    match = score_candidate(source, candidate)
+                    previous = candidates.get(candidate.id)
+                    if previous is None or match.score > previous.score:
+                        candidates[candidate.id] = match
+            for album in results.albums:
+                if album.id not in seen_discovered_albums:
+                    seen_discovered_albums.add(album.id)
+                    discovered_album_ids.append(album.id)
+            for playlist in results.playlists:
+                if playlist.id not in seen_discovered_playlists:
+                    seen_discovered_playlists.add(playlist.id)
+                    discovered_playlist_ids.append(playlist.id)
 
         paginated_hits = 0
         if options.search_pages > 1:
             paginated_query = f"{source.name} {primary_artist}".strip()
             pagination_total = options.search_repeats * options.search_pages
-            for pass_index in range(options.search_repeats):
-                def page_progress(_message: str, current: int, _total: int, pass_index=pass_index) -> None:
+            pagination_completed = 0
+            pagination_reported: set[tuple[int, int]] = set()
+
+            async def run_paginated_pass(pass_index: int):
+                def page_progress(_message: str, current: int, _total: int) -> None:
+                    nonlocal pagination_completed
+                    progress_key = (pass_index, current)
+                    if progress_key in pagination_reported:
+                        return
+                    pagination_reported.add(progress_key)
+                    pagination_completed += 1
                     if progress:
                         progress(
                             f"Paginated pass {pass_index + 1}/{options.search_repeats} · page {current}/{options.search_pages}",
-                            pass_index * options.search_pages + current,
+                            pagination_completed,
                             pagination_total,
                         )
 
                 try:
-                    for candidate in paginated_track_search(
+                    return await paginated_track_search_async(
                         client,
                         paginated_query,
                         options.search_pages * 50,
                         page_progress,
-                    ):
-                        paginated_hits += 1
-                        if candidate.id == track_id:
-                            continue
-                        match = score_candidate(source, candidate)
-                        previous = candidates.get(candidate.id)
-                        if previous is None or match.score > previous.score:
-                            candidates[candidate.id] = match
+                    )
                 except SpotifyScraperError:
+                    return None
+
+            paginated_passes = await _bounded_gather(
+                [lambda pass_index=pass_index: run_paginated_pass(pass_index) for pass_index in range(options.search_repeats)]
+            )
+            for pass_index, pass_tracks in enumerate(paginated_passes):
+                if pass_tracks is None:
+                    paginated_passes[pass_index] = await run_paginated_pass(pass_index)
+            for pass_tracks in paginated_passes:
+                if pass_tracks is None:
                     continue
+                for candidate in pass_tracks:
+                    paginated_hits += 1
+                    if candidate.id == track_id:
+                        continue
+                    match = score_candidate(source, candidate)
+                    previous = candidates.get(candidate.id)
+                    if previous is None or match.score > previous.score:
+                        candidates[candidate.id] = match
 
         release_limit = options.releases_per_artist
         release_ids: list[str] = []
         seen_releases: set[str] = set()
         release_artists = tuple(source.artists if release_limit else ())
-        for artist_index, artist in enumerate(release_artists, 1):
-            if progress:
-                progress("Reading credited-artist discographies", artist_index, len(release_artists))
+        async def read_discography(artist):
             if not artist.id:
-                continue
-            for release in client.get_discography(artist.id, max_releases=release_limit):
+                return ()
+            return await client.get_discography(artist.id, max_releases=release_limit)
+
+        def discography_complete(current: int) -> None:
+            if progress:
+                progress("Reading credited-artist discographies", current, len(release_artists))
+
+        discographies = await _bounded_gather(
+            [lambda artist=artist: read_discography(artist) for artist in release_artists],
+            discography_complete,
+        )
+        for releases in discographies:
+            for release in releases:
                 if release.id not in seen_releases:
                     seen_releases.add(release.id)
                     release_ids.append(release.id)
 
         all_album_ids = list(dict.fromkeys(release_ids + discovered_album_ids[: options.global_albums]))
         albums_scanned = 0
-        album_batches = [all_album_ids[index:index + 20] for index in range(0, len(all_album_ids), 20)]
-        for batch_index, album_batch in enumerate(album_batches, 1):
+        async def read_album(album_id: str):
+            try:
+                return await client.get_album(album_id)
+            except SpotifyScraperError:
+                return None
+
+        def album_complete(current: int) -> None:
             if progress:
-                progress("Scanning album batches", batch_index, len(album_batches))
-            for album_result in client.get_albums(album_batch):
-                if not album_result.ok:
+                progress("Scanning albums", current, len(all_album_ids))
+
+        albums = await _bounded_gather(
+            [lambda album_id=album_id: read_album(album_id) for album_id in all_album_ids],
+            album_complete,
+            limit=ENTITY_CONCURRENCY,
+        )
+        for album in albums:
+            if album is None:
+                continue
+            albums_scanned += 1
+            for candidate in album.tracks:
+                if candidate.id == track_id:
                     continue
-                albums_scanned += 1
-                album = album_result.result
-                for candidate in album.tracks:
-                    if candidate.id == track_id:
-                        continue
-                    if similarity(source.name, candidate.name) < options.minimum_title_similarity / 100:
-                        continue
-                    match = score_candidate(source, candidate, album.name)
-                    previous = candidates.get(candidate.id)
-                    if previous is None or match.score > previous.score:
-                        candidates[candidate.id] = match
+                if similarity(source.name, candidate.name) < options.minimum_title_similarity / 100:
+                    continue
+                match = score_candidate(source, candidate, album.name)
+                previous = candidates.get(candidate.id)
+                if previous is None or match.score > previous.score:
+                    candidates[candidate.id] = match
 
         playlists_scanned = 0
         if options.global_playlists:
             # Playlist expansion catches compilation/Various Artists catalog IDs that
             # artist discographies and Spotify's top track results often omit.
             playlist_ids = discovered_playlist_ids[: options.global_playlists]
-            playlist_batches = [playlist_ids[index:index + 10] for index in range(0, len(playlist_ids), 10)]
-            for batch_index, playlist_batch in enumerate(playlist_batches, 1):
+            async def read_playlist(playlist_id: str):
+                try:
+                    return await client.get_playlist(playlist_id, max_tracks=options.tracks_per_playlist)
+                except SpotifyScraperError:
+                    return None
+
+            def playlist_complete(current: int) -> None:
                 if progress:
-                    progress("Scanning playlist batches", batch_index, len(playlist_batches))
-                for playlist_result in client.get_playlists(playlist_batch, max_tracks=options.tracks_per_playlist):
-                    if not playlist_result.ok:
+                    progress("Scanning playlists", current, len(playlist_ids))
+
+            playlists = await _bounded_gather(
+                [lambda playlist_id=playlist_id: read_playlist(playlist_id) for playlist_id in playlist_ids],
+                playlist_complete,
+                limit=ENTITY_CONCURRENCY,
+            )
+            for playlist in playlists:
+                if playlist is None:
+                    continue
+                playlists_scanned += 1
+                for playlist_item in playlist.tracks:
+                    candidate = playlist_item.track
+                    if candidate.id == track_id or similarity(source.name, candidate.name) < options.minimum_title_similarity / 100:
                         continue
-                    playlists_scanned += 1
-                    for playlist_item in playlist_result.result.tracks:
-                        candidate = playlist_item.track
-                        if candidate.id == track_id or similarity(source.name, candidate.name) < options.minimum_title_similarity / 100:
-                            continue
-                        match = score_candidate(source, candidate)
-                        previous = candidates.get(candidate.id)
-                        if previous is None or match.score > previous.score:
-                            candidates[candidate.id] = match
+                    match = score_candidate(source, candidate)
+                    previous = candidates.get(candidate.id)
+                    if previous is None or match.score > previous.score:
+                        candidates[candidate.id] = match
 
     matches = [
         match
@@ -302,6 +406,14 @@ def find_matches(
     if options.search_pages > 1 or options.global_playlists or options.variant_queries:
         coverage += f", {playlists_scanned} playlists, {options.search_repeats} search passes, {paginated_hits} paginated tracks checked"
     return source, matches[:1000], coverage
+
+
+def find_matches(
+    raw_id: str,
+    options: SearchOptions | None = None,
+    progress: ProgressCallback | None = None,
+) -> tuple[object, list[Match], str]:
+    return asyncio.run(_find_matches_async(raw_id, options, progress))
 
 
 class SpotMatchApp(tk.Tk):
