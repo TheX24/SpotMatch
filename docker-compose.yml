@@ -1,0 +1,48 @@
+# SpotMatch web service. `docker compose up -d --build`, then put a reverse proxy
+# (Caddy, nginx) in front of 127.0.0.1:8765.
+#
+# Without WARP: delete the `warp` service, `depends_on`, and SPOTMATCH_PROXY, and
+# Spotify will see your server's own IP.
+
+services:
+  spotmatch:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      SPOTMATCH_PROXY: socks5://warp:40001
+      SPOTMATCH_MAX_SEARCHES: "6"
+      SPOTMATCH_CACHE_SECONDS: "86400"
+      SPOTMATCH_ALLOWED_ORIGINS: "*"
+      SPOTMATCH_MAX_QUEUE: "30"
+      SPOTMATCH_HOURLY_LIMIT: "20"
+      # Behind a reverse proxy that sets X-Real-IP to the visitor's address, uncomment
+      # so limits apply per visitor instead of to the proxy as a whole:
+      # SPOTMATCH_CLIENT_IP_HEADER: X-Real-IP
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    logging: &logging
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+    depends_on:
+      warp:
+        condition: service_healthy
+
+  warp:
+    build: web/warp
+    restart: unless-stopped
+    # WARP installs routing rules even in proxy mode and reconnects in a loop
+    # without this. It only applies inside this container's own network namespace.
+    cap_add:
+      - NET_ADMIN
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    logging: *logging
+    volumes:
+      - warp-data:/var/lib/cloudflare-warp
+
+volumes:
+  warp-data:

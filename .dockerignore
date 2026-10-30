@@ -1,0 +1,9 @@
+.git
+.venv
+.worktrees
+**/__pycache__
+desktop
+tests
+scripts
+build
+dist

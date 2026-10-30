@@ -2,6 +2,15 @@
 
 Find alternate Spotify IDs for the same recording without a Spotify login or developer API key.
 
+Use it in the browser at **[spotmatch.tx24.dev](https://spotmatch.tx24.dev)**, download the desktop app, or host the web version yourself.
+
+| Folder | What's there |
+|---|---|
+| `spotmatch_core.py` | The search and scoring code, shared by both apps |
+| `web/` | Web page and API server, plus an optional Cloudflare WARP sidecar in `web/warp/` |
+| `desktop/` | Tk desktop app, PyInstaller spec, Linux packaging, and `VERSION` for desktop releases |
+| `tests/`, `scripts/` | Tests for both, release-tag validation |
+
 ## Download the desktop app
 
 Stable `vX.Y.Z` tags publish four downloads on the matching GitHub Release:
@@ -30,7 +39,7 @@ SpotMatch checks for newer stable releases in the background at startup and only
 
 Pushes to `dev` produce temporary test artifacts in GitHub Actions. Stable tags publish a GitHub Release after every platform build passes. Release notes are edited manually on the release page.
 
-## Use SpotMatch
+## Use the desktop app
 
 1. Open SpotMatch.
 2. Paste a Spotify track ID, URI, or URL.
@@ -53,15 +62,60 @@ Search options:
 
 Treat scores as suggestions: live, remastered, clean, explicit, sped-up, and region-specific releases can still require human review.
 
-## Run from source
+## Run the desktop app from source
 
 Requires Python 3.10 or newer:
 
 ```powershell
-python -m pip install -r requirements.txt
-python app.py
+python -m pip install -r desktop/requirements.txt
+python desktop/app.py
 ```
 
 SpotMatch uses SpotifyScraper and Spotify's undocumented public web endpoints. It can break if Spotify changes those endpoints. No Spotify account, cookie, password, or token is requested or stored.
 
-Long searches show phase-specific progress for repeated queries, pagination, artist discographies, album batches, and playlist batches.
+The desktop app shows phase-specific progress for repeated queries, pagination, artist discographies, album batches, and playlist batches.
+
+## Web version
+
+The web version runs one fixed deep search per track (Spotify search with deep pagination, no discography or playlist scans: about 80 Spotify requests and 40 seconds). Results are cached per track for a day, identical searches share one run, each visitor gets one search at a time, and searches beyond the concurrency limit wait in a queue.
+
+On the page, click a row to select it, Shift-click to select a range, and Ctrl+A to select everything shown. **Copy IDs** gives the Spicy Lyrics bot format; when the list is longer than the bot's 4000-character paste box, use **Export .txt**. **Server** points the page at a different SpotMatch server, saved in that browser.
+
+### Self-host with Docker
+
+```bash
+docker compose up -d --build
+```
+
+This starts the server on `127.0.0.1:8765` behind a Cloudflare WARP container, so Spotify sees a Cloudflare address instead of your server's. Starting the WARP container accepts [Cloudflare's WARP terms](https://www.cloudflare.com/application/terms/). To skip WARP, remove the `warp` service, `depends_on`, and `SPOTMATCH_PROXY` from `docker-compose.yml`.
+
+Put a reverse proxy in front of it. Progress is streamed, so turn off response buffering (Caddy: `flush_interval -1`; nginx: `proxy_buffering off`).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `SPOTMATCH_PROXY` | none | Proxy for Spotify requests, e.g. `socks5://warp:40001` |
+| `SPOTMATCH_MAX_SEARCHES` | `6` | Searches that run at once; more wait in a queue |
+| `SPOTMATCH_CACHE_SECONDS` | `86400` | How long a finished result is reused |
+| `SPOTMATCH_ALLOWED_ORIGINS` | `*` | Sites allowed to call the API from a browser |
+| `SPOTMATCH_MAX_QUEUE` | `30` | Searches that may wait for a slot; beyond that, new ones get "busy, try later" |
+| `SPOTMATCH_HOURLY_LIMIT` | `20` | New searches per visitor per hour (cached results don't count) |
+| `SPOTMATCH_MAX_STREAMS` | `3` | Open result streams per visitor |
+| `SPOTMATCH_SEARCH_TIMEOUT` | `180` | Seconds before a stuck search is stopped |
+| `SPOTMATCH_CACHE_ENTRIES` | `300` | Finished results kept in memory |
+| `SPOTMATCH_RELEASES_PER_ARTIST` | `0` | Also scan this many releases per credited artist. Finds album copies Spotify hides from search, at about one extra request per release |
+| `SPOTMATCH_CLIENT_IP_HEADER` | unset | Header your reverse proxy sets to the visitor's address (e.g. `X-Real-IP`). Only set it if nothing can reach the server except through that proxy |
+
+The compose file also caps memory, CPU, processes and log size, and the server refuses connections past 300 at once.
+
+To serve the page somewhere else (any static host), copy `web/static/` and set `apiBase` in `web/static/config.js` to your server's URL.
+
+### Run without Docker
+
+```powershell
+python -m pip install -r web/requirements.txt
+python -m uvicorn web.server:app --port 8765
+```
+
+### API
+
+`GET /api/match?track=<ID, URI, or link>` streams server-sent events: `queued` (with `position`), `progress` (`message`, `current`, `total`), then one `result` (`source`, `matches`, `coverage`) or `error` (`message`). `GET /api/health` reports load.
