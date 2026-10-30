@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
-from release_support import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "desktop"))
+
+from release_support import (  # noqa: E402
     ReleaseInfo,
     UpdateCheckError,
     classify_update,
@@ -119,7 +122,7 @@ class ReleaseSupportTests(unittest.TestCase):
         browser.assert_called_once_with("https://open.spotify.com/track/id")
 
     def test_linux_packaging_files_have_required_entries(self):
-        root = Path(__file__).resolve().parents[1]
+        root = Path(__file__).resolve().parents[1] / "desktop"
         desktop = (root / "packaging/linux/SpotMatch.desktop").read_text(encoding="utf-8")
         app_run = (root / "packaging/linux/AppRun").read_text(encoding="utf-8")
         self.assertIn("Exec=SpotMatch", desktop)

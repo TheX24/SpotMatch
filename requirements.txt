@@ -1,2 +1,1 @@
 spotifyscraper==3.9.2
-sv-ttk==2.6.1
