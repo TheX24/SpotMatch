@@ -1,0 +1,4 @@
+-r ../requirements.txt
+fastapi==0.162.0
+uvicorn==0.54.0
+socksio==1.0.0

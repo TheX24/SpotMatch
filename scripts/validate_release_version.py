@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "desktop"))
 
 from release_support import validate_release_tag  # noqa: E402
 
@@ -15,7 +15,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a SpotMatch stable release tag.")
     parser.add_argument("--tag", required=True)
     args = parser.parse_args()
-    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    version = (ROOT / "desktop" / "VERSION").read_text(encoding="utf-8").strip()
     try:
         validate_release_tag(args.tag, version)
     except ValueError as error:

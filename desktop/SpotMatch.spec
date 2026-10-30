@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
+
+# spotmatch_core.py sits at the repository root, one level up from this spec.
+ROOT = str(Path(SPECPATH).resolve().parent)
 
 
 datas = [("VERSION", "."), *collect_data_files("sv_ttk")]
 
 a = Analysis(
     ["app.py"],
-    pathex=[],
+    pathex=[ROOT],
     binaries=[],
     datas=datas,
     hiddenimports=[],

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from spotify_scraper import NotFoundError
 
-from app import SearchOptions, find_matches
+from spotmatch_core import SearchOptions, find_matches
 
 
 TRACK_ID = "A" * 22
@@ -56,7 +56,7 @@ class SearchResilienceTests(unittest.TestCase):
             ),
         )
 
-        with patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
+        with patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
             _, matches, _ = find_matches(
                 TRACK_ID,
                 SearchOptions(search_repeats=1, releases_per_artist=0),
@@ -82,8 +82,8 @@ class SearchResilienceTests(unittest.TestCase):
         )
 
         with (
-            patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)),
-            patch("app.paginated_track_search_async", paginated_search),
+            patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)),
+            patch("spotmatch_core.paginated_track_search_async", paginated_search),
         ):
             _, matches, _ = find_matches(
                 TRACK_ID,
@@ -96,6 +96,23 @@ class SearchResilienceTests(unittest.TestCase):
 
         self.assertEqual([match.track_id for match in matches], [CANDIDATE_ID])
         self.assertEqual(paginated_search.await_count, 3)
+
+    def test_paginated_passes_rotate_query_wordings(self):
+        source = track(TRACK_ID)
+        client = SimpleNamespace(
+            get_track=AsyncMock(return_value=source),
+            search=AsyncMock(return_value=search_results()),
+        )
+        paginated_search = AsyncMock(return_value=[])
+
+        with (
+            patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)),
+            patch("spotmatch_core.paginated_track_search_async", paginated_search),
+        ):
+            find_matches(TRACK_ID, SearchOptions(search_pages=2, search_repeats=3, releases_per_artist=0))
+
+        queries = sorted(call.args[1] for call in paginated_search.await_args_list)
+        self.assertEqual(queries, ["Artist Song", "Song", "Song Artist"])
 
 
 class SearchConcurrencyTests(unittest.TestCase):
@@ -117,7 +134,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             search=delayed_search,
         )
 
-        with patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
+        with patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
             find_matches(
                 TRACK_ID,
                 SearchOptions(
@@ -141,7 +158,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             constructor_options.update(options)
             return AsyncClientContext(client)
 
-        with patch("app.AsyncSpotifyClient", side_effect=client_factory):
+        with patch("spotmatch_core.AsyncSpotifyClient", side_effect=client_factory):
             find_matches(
                 TRACK_ID,
                 SearchOptions(search_repeats=1, releases_per_artist=0),
@@ -166,7 +183,7 @@ class SearchConcurrencyTests(unittest.TestCase):
         )
         progress: list[tuple[str, int, int]] = []
 
-        with patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
+        with patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
             find_matches(
                 TRACK_ID,
                 SearchOptions(search_repeats=1, releases_per_artist=0),
@@ -194,8 +211,8 @@ class SearchConcurrencyTests(unittest.TestCase):
             return []
 
         with (
-            patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)),
-            patch("app.paginated_track_search_async", side_effect=paginated),
+            patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)),
+            patch("spotmatch_core.paginated_track_search_async", side_effect=paginated),
         ):
             find_matches(
                 TRACK_ID,
@@ -229,7 +246,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             get_album=get_album,
         )
 
-        with patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
+        with patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
             _source, _matches, coverage = find_matches(
                 TRACK_ID,
                 SearchOptions(search_repeats=1, releases_per_artist=21),
@@ -258,7 +275,7 @@ class SearchConcurrencyTests(unittest.TestCase):
             get_playlist=get_playlist,
         )
 
-        with patch("app.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
+        with patch("spotmatch_core.AsyncSpotifyClient", return_value=AsyncClientContext(client)):
             _source, _matches, coverage = find_matches(
                 TRACK_ID,
                 SearchOptions(
