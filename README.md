@@ -98,7 +98,8 @@ Put a reverse proxy in front of it. Progress is streamed, so turn off response b
 | `SPOTMATCH_CACHE_SECONDS` | `86400` | How long a finished result is reused |
 | `SPOTMATCH_ALLOWED_ORIGINS` | `*` | Sites allowed to call the API from a browser |
 | `SPOTMATCH_MAX_QUEUE` | `30` | Searches that may wait for a slot; beyond that, new ones get "busy, try later" |
-| `SPOTMATCH_HOURLY_LIMIT` | `20` | New searches per visitor per hour (cached results don't count) |
+| `SPOTMATCH_HOURLY_LIMIT` | `20` | New searches per visitor per hour (cached results don't count). IPv6 visitors count per /64 |
+| `SPOTMATCH_GLOBAL_PER_MINUTE` | `30` | New searches per minute across everyone; protects your outbound IP from Spotify rate limits |
 | `SPOTMATCH_MAX_STREAMS` | `3` | Open result streams per visitor |
 | `SPOTMATCH_SEARCH_TIMEOUT` | `180` | Seconds before a stuck search is stopped |
 | `SPOTMATCH_CACHE_ENTRIES` | `300` | Finished results kept in memory |

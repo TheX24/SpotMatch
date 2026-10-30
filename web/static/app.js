@@ -248,14 +248,47 @@ function handle(event) {
 	} else if (event.type === "result") {
 		setSearching(false);
 		orbit.found();
-		current = event;
-		const count = event.matches.length;
+		current = cleanResult(event);
+		const count = current.matches.length;
 		setStatus(event.cached ? `Showing a saved result from ${new Date(event.searched_at * 1000).toLocaleString()}.` : `Found ${count} candidate${count === 1 ? "" : "s"}.`);
 		finder.classList.add("is-compact");
 		render();
 	} else if (event.type === "error") {
 		failed(event.message);
 	}
+}
+
+// The page may talk to a server someone else runs, so pin every field to the
+// type the renderer expects before any of it reaches innerHTML.
+function cleanResult(event) {
+	const text = (value) => String(value ?? "");
+	const number = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+	const id = (value) => (/^[A-Za-z0-9]{22}$/.test(String(value)) ? String(value) : "");
+	const source = event.source || {};
+	return {
+		cached: Boolean(event.cached),
+		searched_at: number(event.searched_at),
+		coverage: text(event.coverage),
+		source: {
+			track_id: id(source.track_id),
+			title: text(source.title),
+			artists: text(source.artists),
+			album: text(source.album),
+			duration_ms: number(source.duration_ms),
+			image: /^https:\/\//.test(text(source.image)) ? text(source.image) : null,
+		},
+		matches: (Array.isArray(event.matches) ? event.matches : [])
+			.map((m) => ({
+				track_id: id(m.track_id),
+				title: text(m.title),
+				artists: text(m.artists),
+				album: text(m.album),
+				duration_ms: number(m.duration_ms),
+				score: number(m.score),
+				duration_delta_ms: number(m.duration_delta_ms),
+			}))
+			.filter((m) => m.track_id),
+	};
 }
 
 function failed(message) {

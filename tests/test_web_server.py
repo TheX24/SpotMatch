@@ -39,7 +39,8 @@ class WebServerTests(unittest.TestCase):
         server.cache.clear()
         server.jobs.clear()
         server.recent_searches.clear()
-        server.active_clients.clear()
+        server.open_streams.clear()
+        server.recent_global.clear()
         server.waiting = 0
         self.client = TestClient(server.app)
 
@@ -77,16 +78,54 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(server._searches_left("testclient"), server.HOURLY_LIMIT)
         self.assertNotIn("testclient", server.recent_searches)
 
-    def test_full_queue_turns_new_searches_away(self):
-        server.waiting = server.MAX_QUEUE
-        response = self.client.get(f"/api/match?track={TRACK}")
-        self.assertEqual(response.status_code, 503)
-        self.assertIn("Retry-After", response.headers)
-
     def test_too_many_open_streams_is_refused(self):
-        server.active_clients["testclient"] = server.MAX_STREAMS
+        now = time.monotonic()
+        server.open_streams["testclient"].update({n: now for n in range(server.MAX_STREAMS)})
         response = self.client.get(f"/api/match?track={TRACK}")
         self.assertEqual(response.status_code, 429)
+
+    def test_stream_reservation_that_never_starts_expires(self):
+        stale = time.monotonic() - server.STREAM_RESERVATION_SECONDS - 1
+        server.open_streams["testclient"].update({1: stale, 2: None})
+        self.assertEqual(server._open_stream_count("testclient"), 1)
+
+    def test_second_search_is_refused_while_first_still_runs(self):
+        # The running search is recorded synchronously, so a parallel burst can't slip past.
+        server.jobs["C" * 22] = server.Job("C" * 22, "testclient")
+        response = self.client.get(f"/api/match?track={TRACK}")
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("already have a search", response.json()["error"])
+
+    def test_queue_cap_counts_jobs_not_yet_queued(self):
+        for n in range(server.MAX_SEARCHES + server.MAX_QUEUE):
+            server.jobs[f"{n:022d}"] = server.Job(f"{n:022d}", f"other-{n}")
+        response = self.client.get(f"/api/match?track={TRACK}")
+        self.assertEqual(response.status_code, 503)
+
+    def test_global_rate_cap_turns_new_searches_away(self):
+        server.recent_global.extend([time.monotonic()] * server.GLOBAL_PER_MINUTE)
+        response = self.client.get(f"/api/match?track={TRACK}")
+        self.assertEqual(response.status_code, 503)
+
+    def test_sweep_forgets_visitors_idle_for_an_hour(self):
+        server.recent_searches["old"].append(time.monotonic() - 4000)
+        server.recent_searches["new"].append(time.monotonic())
+        server._sweep_recent()
+        self.assertEqual(list(server.recent_searches), ["new"])
+
+    def test_ipv6_visitors_count_per_64(self):
+        def key(address):
+            return server._client_key(SimpleNamespace(headers={"cf-connecting-ip": address}, client=None))
+
+        with patch.object(server, "CLIENT_IP_HEADER", "cf-connecting-ip"):
+            self.assertEqual(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"))
+            self.assertNotEqual(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"))
+            self.assertEqual(key("203.0.113.9"), "203.0.113.9")
+            self.assertEqual(key("::ffff:203.0.113.9"), "203.0.113.9")
+
+    def test_unexpected_errors_do_not_leak_details(self):
+        message = server._describe_error(RuntimeError("socks5://warp:40001 refused"))
+        self.assertNotIn("warp", message)
 
     def test_cache_drops_least_recently_used(self):
         with patch.object(server, "CACHE_ENTRIES", 2):
