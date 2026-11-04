@@ -37,7 +37,7 @@ services:
     # without this. It only applies inside this container's own network namespace.
     cap_add:
       - NET_ADMIN
-    mem_limit: 256m
+    mem_limit: 512m
     cpus: 0.5
     pids_limit: 128
     logging: *logging
